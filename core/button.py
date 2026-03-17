@@ -59,6 +59,7 @@ if config.MOCKFISH or not gpiozero_available:
     Button = MockButton
 from .movements import move_head
 from .session_manager import BillySession
+from .wake_word_listener import WakeWordListener
 
 
 # Button and session globals
@@ -72,6 +73,7 @@ _session_start_lock = threading.Lock()  # Lock to prevent concurrent session sta
 
 # Setup hardware button
 button = Button(config.BUTTON_PIN, pull_up=True)
+wake_word_listener = None
 
 
 def _force_release_session_start_lock(reason: str):
@@ -105,7 +107,7 @@ def is_billy_speaking():
     return bool(not audio.playback_queue.empty())
 
 
-def on_button():
+def trigger_session(source: str = "button", require_physical_press: bool = False):
     global \
         is_active, \
         session_thread, \
@@ -118,11 +120,11 @@ def on_button():
         return  # Ignore very quick repeat presses (debounce)
     last_button_time = now
 
-    if not button.is_pressed:
+    if require_physical_press and not button.is_pressed:
         return
 
     if is_active:
-        logger.info("Button pressed during active session.", "🔁")
+        logger.info(f"{source.capitalize()} trigger during active session.", "🔁")
         if (
             session_instance
             and session_instance.loop
@@ -275,7 +277,7 @@ def on_button():
         threading.Thread(target=audio.play_random_wake_up_clip, daemon=True).start()
         is_active = True
         interrupt_event = threading.Event()  # Fresh event for each session
-        logger.info("Button pressed. Listening...", "🎤")
+        logger.info(f"{source.capitalize()} trigger. Listening...", "🎤")
 
         def run_session():
             global session_instance, is_active
@@ -304,9 +306,23 @@ def on_button():
             _session_start_lock.release()
 
 
+def on_button():
+    trigger_session(source="button", require_physical_press=True)
+
+
+def on_wake_word():
+    trigger_session(source="wake word", require_physical_press=False)
+
+
 def start_loop():
+    global wake_word_listener
+
     audio.detect_devices(debug=config.DEBUG_MODE)
     _ensure_button_hold_thread()
+
+    if config.LOCAL_WAKE_WORD_ENABLED:
+        wake_word_listener = WakeWordListener(on_detected=on_wake_word)
+        wake_word_listener.start()
 
     if config.FLAP_ON_BOOT:
         logger.info("Starting Billy startup animation", "🎭")

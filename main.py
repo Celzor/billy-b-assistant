@@ -54,6 +54,9 @@ def signal_handler(sig, frame):
     playback_queue.put(None)
     from core.movements import cleanup_gpio
 
+    if getattr(core.button, "wake_word_listener", None):
+        core.button.wake_word_listener.stop()
+
     cleanup_gpio()
     stop_mqtt()
     sys.exit(0)
@@ -81,6 +84,9 @@ if __name__ == "__main__":
         print("❌ Unhandled exception occurred:", e)
         traceback.print_exc()
         from core.movements import cleanup_gpio
+
+        if getattr(core.button, "wake_word_listener", None):
+            core.button.wake_word_listener.stop()
 
         cleanup_gpio()
         stop_mqtt()

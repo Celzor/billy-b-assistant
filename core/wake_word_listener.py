@@ -3,10 +3,15 @@ import queue
 import threading
 import time
 
+import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 
 from . import audio, config
 from .logger import logger
+
+# Vosk's small EN model expects 16000 Hz mono audio.
+_VOSK_RATE = 16000
 
 
 class WakeWordListener:
@@ -16,10 +21,16 @@ class WakeWordListener:
         self._model = None
         self._stream = None
         self._thread = None
-        self._audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=200)
+        # Smaller queue: we only need a brief buffer, not 200 stale chunks
+        self._audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=30)
         self._stop_event = threading.Event()
         self._last_trigger_time = 0.0
         self._wake_phrase = config.LOCAL_WAKE_WORD_PHRASE.lower().strip()
+        # Precompute resample ratio (e.g. 48000 -> 16000 = up=1, down=3)
+        from math import gcd
+        _g = gcd(_VOSK_RATE, audio.MIC_RATE)
+        self._resample_up = _VOSK_RATE // _g
+        self._resample_down = audio.MIC_RATE // _g
 
     def _ensure_model(self):
         try:
@@ -32,7 +43,8 @@ class WakeWordListener:
 
         try:
             model = Model(config.LOCAL_WAKE_WORD_MODEL_PATH)
-            recognizer = KaldiRecognizer(model, audio.MIC_RATE)
+            # Always initialise the recogniser at the model's native rate
+            recognizer = KaldiRecognizer(model, _VOSK_RATE)
             return model, recognizer
         except Exception as e:
             logger.error(
@@ -47,7 +59,15 @@ class WakeWordListener:
         try:
             self._audio_queue.put_nowait(bytes(indata))
         except queue.Full:
-            logger.warning("Wake-word queue full; dropping chunk", "⚠️")
+            pass  # silently drop; overflow logging would create its own lag
+
+    def _to_vosk_rate(self, raw_bytes: bytes) -> bytes:
+        """Downsample int16 PCM from MIC_RATE to _VOSK_RATE."""
+        if audio.MIC_RATE == _VOSK_RATE:
+            return raw_bytes
+        arr = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
+        resampled = resample_poly(arr, self._resample_up, self._resample_down)
+        return resampled.astype(np.int16).tobytes()
 
     def _handle_result(self, result_json: str):
         if not result_json:
@@ -80,10 +100,14 @@ class WakeWordListener:
             "🛎️",
         )
 
+        # Use a larger block so the callback fires less often (~250 ms per chunk),
+        # giving the processing thread enough slack to downsample and run Vosk.
+        wake_blocksize = max(audio.CHUNK_SIZE * 4, 4096)
+
         try:
             self._stream = sd.RawInputStream(
                 samplerate=audio.MIC_RATE,
-                blocksize=audio.CHUNK_SIZE,
+                blocksize=wake_blocksize,
                 device=audio.MIC_DEVICE_INDEX,
                 dtype="int16",
                 channels=1,
@@ -100,7 +124,8 @@ class WakeWordListener:
             except queue.Empty:
                 continue
 
-            if self._recognizer.AcceptWaveform(chunk):
+            vosk_chunk = self._to_vosk_rate(chunk)
+            if self._recognizer.AcceptWaveform(vosk_chunk):
                 self._handle_result(self._recognizer.Result())
             else:
                 self._handle_result(self._recognizer.PartialResult())

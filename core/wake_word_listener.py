@@ -5,7 +5,6 @@ import time
 
 import numpy as np
 import sounddevice as sd
-from scipy.signal import resample_poly
 
 from . import audio, config
 from .logger import logger
@@ -26,11 +25,6 @@ class WakeWordListener:
         self._stop_event = threading.Event()
         self._last_trigger_time = 0.0
         self._wake_phrase = config.LOCAL_WAKE_WORD_PHRASE.lower().strip()
-        # Precompute resample ratio (e.g. 48000 -> 16000 = up=1, down=3)
-        from math import gcd
-        _g = gcd(_VOSK_RATE, audio.MIC_RATE)
-        self._resample_up = _VOSK_RATE // _g
-        self._resample_down = audio.MIC_RATE // _g
 
     def _ensure_model(self):
         try:
@@ -61,13 +55,18 @@ class WakeWordListener:
         except queue.Full:
             pass  # silently drop; overflow logging would create its own lag
 
-    def _to_vosk_rate(self, raw_bytes: bytes) -> bytes:
-        """Downsample int16 PCM from MIC_RATE to _VOSK_RATE."""
-        if audio.MIC_RATE == _VOSK_RATE:
+    def _downsample(self, raw_bytes: bytes, from_rate: int) -> bytes:
+        """Fast integer decimation to _VOSK_RATE via numpy slice.
+
+        Simple striding (arr[::step]) is orders of magnitude faster than
+        resample_poly on slow hardware. Aliasing above _VOSK_RATE/2 is
+        acceptable for wake-word detection (speech sits below ~4 kHz).
+        """
+        step = from_rate // _VOSK_RATE
+        if step <= 1:
             return raw_bytes
-        arr = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32)
-        resampled = resample_poly(arr, self._resample_up, self._resample_down)
-        return resampled.astype(np.int16).tobytes()
+        arr = np.frombuffer(raw_bytes, dtype=np.int16)
+        return arr[::step].tobytes()
 
     def _handle_result(self, result_json: str) -> bool:
         """Returns True if the wake phrase was detected, False otherwise."""
@@ -101,14 +100,41 @@ class WakeWordListener:
             "🛎️",
         )
 
-        # 8000-sample block at 48000 Hz = ~167 ms per chunk, slow enough
-        # to avoid input overflow without lag.
+        # Try to open the mic directly at the model's native rate so no
+        # resampling is needed at all.  If the hardware doesn't support 16 kHz,
+        # fall back to the system mic rate and downsample via fast integer
+        # decimation (arr[::step], not resample_poly).
+        stream_rate = None
+        for candidate in (_VOSK_RATE, audio.MIC_RATE):
+            try:
+                sd.check_input_settings(
+                    device=audio.MIC_DEVICE_INDEX, samplerate=candidate, channels=1
+                )
+                stream_rate = candidate
+                break
+            except Exception:
+                continue
+
+        if stream_rate is None:
+            logger.error("Wake-word mic supports neither 16000 Hz nor the system mic rate")
+            return
+
+        if stream_rate == _VOSK_RATE:
+            logger.info(f"Wake-word stream at {stream_rate} Hz — no resampling needed", "🎙️")
+        else:
+            logger.info(
+                f"Wake-word stream at {stream_rate} Hz — decimating to {_VOSK_RATE} Hz", "🎙️"
+            )
+
+        # At 16000 Hz, 8000 samples = 500 ms per chunk (2 callbacks/s).
+        # At 48000 Hz, 8000 samples = 167 ms per chunk (6 callbacks/s).
+        # Both are slow enough that processing never falls behind.
         wake_blocksize = 8000
         detected = False
 
         try:
             self._stream = sd.RawInputStream(
-                samplerate=audio.MIC_RATE,
+                samplerate=stream_rate,
                 blocksize=wake_blocksize,
                 device=audio.MIC_DEVICE_INDEX,
                 dtype="int16",
@@ -126,7 +152,7 @@ class WakeWordListener:
             except queue.Empty:
                 continue
 
-            vosk_chunk = self._to_vosk_rate(chunk)
+            vosk_chunk = self._downsample(chunk, stream_rate) if stream_rate != _VOSK_RATE else chunk
             if self._recognizer.AcceptWaveform(vosk_chunk):
                 if self._handle_result(self._recognizer.Result()):
                     detected = True

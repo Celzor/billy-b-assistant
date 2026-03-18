@@ -321,13 +321,8 @@ def start_loop():
     _ensure_button_hold_thread()
 
     if config.LOCAL_WAKE_WORD_ENABLED:
-        logger.info(
-            f"Local wake-word enabled (phrase='{config.LOCAL_WAKE_WORD_PHRASE}')", "🛎️"
-        )
         wake_word_listener = WakeWordListener(on_detected=on_wake_word)
         wake_word_listener.start()
-    else:
-        logger.info("Local wake-word disabled", "🛎️")
 
     if config.FLAP_ON_BOOT:
         logger.info("Starting Billy startup animation", "🎭")

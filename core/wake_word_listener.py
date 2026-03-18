@@ -1,5 +1,4 @@
 import json
-import os
 import queue
 import threading
 import time
@@ -17,43 +16,10 @@ class WakeWordListener:
         self._model = None
         self._stream = None
         self._thread = None
-        self._audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=64)
+        self._audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=200)
         self._stop_event = threading.Event()
         self._last_trigger_time = 0.0
         self._wake_phrase = config.LOCAL_WAKE_WORD_PHRASE.lower().strip()
-        self._last_status_log_time = 0.0
-        self._status_log_interval_seconds = 5.0
-        self._recent_phrases: list[str] = []
-        self._last_overflow_log_time = 0.0
-        self._overflow_log_interval_seconds = 5.0
-        self._samplerate = self._pick_samplerate()
-        self._blocksize = max(1, int(self._samplerate * 0.25))
-
-    def _pick_samplerate(self) -> int:
-        preferred_rates = [16000]
-        if audio.MIC_RATE not in preferred_rates:
-            preferred_rates.append(audio.MIC_RATE)
-        preferred_rates.extend(
-            rate for rate in [24000, 48000, 44100] if rate not in preferred_rates
-        )
-
-        for rate in preferred_rates:
-            try:
-                sd.check_input_settings(
-                    device=audio.MIC_DEVICE_INDEX,
-                    samplerate=rate,
-                    channels=1,
-                    dtype='int16',
-                )
-                return rate
-            except Exception:
-                continue
-
-        logger.warning(
-            f"Wake-word listener could not validate a mono input rate; falling back to MIC_RATE={audio.MIC_RATE}",
-            "⚠️",
-        )
-        return audio.MIC_RATE
 
     def _ensure_model(self):
         try:
@@ -64,18 +30,9 @@ class WakeWordListener:
             )
             return None, None
 
-        model_path = config.LOCAL_WAKE_WORD_MODEL_PATH
-        if not os.path.isdir(model_path):
-            logger.error(
-                "Wake-word model directory is missing: "
-                f"{model_path}. Download a Vosk model on the Raspberry Pi and set "
-                "LOCAL_WAKE_WORD_MODEL_PATH to that folder.",
-            )
-            return None, None
-
         try:
-            model = Model(model_path)
-            recognizer = KaldiRecognizer(model, self._samplerate)
+            model = Model(config.LOCAL_WAKE_WORD_MODEL_PATH)
+            recognizer = KaldiRecognizer(model, audio.MIC_RATE)
             return model, recognizer
         except Exception as e:
             logger.error(
@@ -86,74 +43,27 @@ class WakeWordListener:
     def _audio_callback(self, indata, frames, time_info, status):
         del frames, time_info
         if status:
-            now = time.time()
-            if (
-                now - self._last_overflow_log_time
-                >= self._overflow_log_interval_seconds
-            ):
-                logger.warning(
-                    "Wake-word audio status: "
-                    f"{status} | samplerate={self._samplerate} | blocksize={self._blocksize}",
-                    "⚠️",
-                )
-                self._last_overflow_log_time = now
+            logger.verbose(f"Wake-word audio status: {status}")
         try:
             self._audio_queue.put_nowait(bytes(indata))
         except queue.Full:
             logger.warning("Wake-word queue full; dropping chunk", "⚠️")
 
-    def _track_phrase(self, text: str):
-        if not text:
-            return
-
-        if self._recent_phrases and self._recent_phrases[-1] == text:
-            return
-
-        self._recent_phrases.append(text)
-
-        if len(self._recent_phrases) > 10:
-            self._recent_phrases = self._recent_phrases[-10:]
-
-    def _maybe_log_status(self):
-        now = time.time()
-        if now - self._last_status_log_time < self._status_log_interval_seconds:
-            return
-
-        heard_text = ", ".join(self._recent_phrases) if self._recent_phrases else "none"
-        logger.info(
-            "Wake-word listener running | "
-            f"target='{config.LOCAL_WAKE_WORD_PHRASE}' | samplerate={self._samplerate} | "
-            f"blocksize={self._blocksize} | queue={self._audio_queue.qsize()} | "
-            f"heard_recent={heard_text}",
-            "🩺",
-        )
-        self._recent_phrases.clear()
-        self._last_status_log_time = now
-
     def _handle_result(self, result_json: str):
         if not result_json:
             return
-
         try:
             payload = json.loads(result_json)
         except json.JSONDecodeError:
             return
-
-        text = (payload.get("text") or payload.get("partial") or "").lower().strip()
+        text = (payload.get("text") or "").lower().strip()
         if not text:
             return
-
-        self._track_phrase(text)
-
         if self._wake_phrase not in text:
             return
 
         now = time.time()
         if now - self._last_trigger_time < config.LOCAL_WAKE_WORD_COOLDOWN_SECONDS:
-            logger.info(
-                f"Wake phrase heard during cooldown ({config.LOCAL_WAKE_WORD_COOLDOWN_SECONDS}s): '{text}'",
-                "⏱️",
-            )
             return
         self._last_trigger_time = now
 
@@ -172,26 +82,19 @@ class WakeWordListener:
 
         try:
             self._stream = sd.RawInputStream(
-                samplerate=self._samplerate,
-                blocksize=self._blocksize,
+                samplerate=audio.MIC_RATE,
+                blocksize=audio.CHUNK_SIZE,
                 device=audio.MIC_DEVICE_INDEX,
                 dtype="int16",
                 channels=1,
                 callback=self._audio_callback,
-                latency="high",
             )
             self._stream.start()
-            logger.info(
-                f"Wake-word microphone stream started | samplerate={self._samplerate} | blocksize={self._blocksize}",
-                "🎙️",
-            )
         except Exception as e:
             logger.error(f"Failed to start wake-word microphone stream: {e}")
             return
 
         while not self._stop_event.is_set():
-            self._maybe_log_status()
-
             try:
                 chunk = self._audio_queue.get(timeout=0.2)
             except queue.Empty:
@@ -213,7 +116,6 @@ class WakeWordListener:
     def start(self):
         if self._thread and self._thread.is_alive():
             return
-
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()

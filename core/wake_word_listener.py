@@ -69,26 +69,27 @@ class WakeWordListener:
         resampled = resample_poly(arr, self._resample_up, self._resample_down)
         return resampled.astype(np.int16).tobytes()
 
-    def _handle_result(self, result_json: str):
+    def _handle_result(self, result_json: str) -> bool:
+        """Returns True if the wake phrase was detected, False otherwise."""
         if not result_json:
-            return
+            return False
         try:
             payload = json.loads(result_json)
         except json.JSONDecodeError:
-            return
+            return False
         text = (payload.get("text") or "").lower().strip()
         if not text:
-            return
+            return False
         if self._wake_phrase not in text:
-            return
+            return False
 
         now = time.time()
         if now - self._last_trigger_time < config.LOCAL_WAKE_WORD_COOLDOWN_SECONDS:
-            return
+            return False
         self._last_trigger_time = now
 
         logger.success(f"Wake phrase detected: '{text}'", "👂")
-        self.on_detected()
+        return True
 
     def _run(self):
         self._model, self._recognizer = self._ensure_model()
@@ -103,6 +104,7 @@ class WakeWordListener:
         # 8000-sample block at 48000 Hz = ~167 ms per chunk, slow enough
         # to avoid input overflow without lag.
         wake_blocksize = 8000
+        detected = False
 
         try:
             self._stream = sd.RawInputStream(
@@ -126,17 +128,28 @@ class WakeWordListener:
 
             vosk_chunk = self._to_vosk_rate(chunk)
             if self._recognizer.AcceptWaveform(vosk_chunk):
-                self._handle_result(self._recognizer.Result())
+                if self._handle_result(self._recognizer.Result()):
+                    detected = True
+                    self._stop_event.set()
             else:
-                self._handle_result(self._recognizer.PartialResult())
+                if self._handle_result(self._recognizer.PartialResult()):
+                    detected = True
+                    self._stop_event.set()
 
+        # Release the ALSA device BEFORE notifying the session.
+        # If on_detected() is called while the stream is still open, ALSA will
+        # refuse the session's attempt to open the same mic device.
         try:
             self._stream.stop()
             self._stream.close()
+            self._stream = None
         except Exception:
             pass
 
         logger.info("Wake-word listener stopped", "🛑")
+
+        if detected:
+            self.on_detected()
 
     def start(self):
         if self._thread and self._thread.is_alive():

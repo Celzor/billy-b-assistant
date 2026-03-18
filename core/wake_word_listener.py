@@ -11,7 +11,7 @@ from . import audio, config
 from .logger import logger
 
 # Vosk's small EN model expects 16000 Hz mono audio.
-_VOSK_RATE = 8000
+_VOSK_RATE = 16000
 
 
 class WakeWordListener:
@@ -55,7 +55,7 @@ class WakeWordListener:
     def _audio_callback(self, indata, frames, time_info, status):
         del frames, time_info
         if status:
-            logger.verbose(f"Wake-word audio status Has the file even changed?: {status}")
+            logger.verbose(f"Wake-word status: {status}")
         try:
             self._audio_queue.put_nowait(bytes(indata))
         except queue.Full:
@@ -100,9 +100,9 @@ class WakeWordListener:
             "🛎️",
         )
 
-        # Use a larger block so the callback fires less often (~250 ms per chunk),
-        # giving the processing thread enough slack to downsample and run Vosk.
-        wake_blocksize = max(audio.CHUNK_SIZE * 4, 4096)
+        # 8000-sample block at 48000 Hz = ~167 ms per chunk, slow enough
+        # to avoid input overflow without lag.
+        wake_blocksize = 8000
 
         try:
             self._stream = sd.RawInputStream(

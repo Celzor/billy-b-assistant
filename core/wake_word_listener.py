@@ -11,7 +11,7 @@ from . import audio, config
 from .logger import logger
 
 # Vosk's small EN model expects 16000 Hz mono audio.
-_VOSK_RATE = 16000
+_VOSK_RATE = 8000
 
 
 class WakeWordListener:
@@ -55,7 +55,7 @@ class WakeWordListener:
     def _audio_callback(self, indata, frames, time_info, status):
         del frames, time_info
         if status:
-            logger.verbose(f"Wake-word audio status: {status}")
+            logger.verbose(f"Wake-word audio status Has the file even changed?: {status}")
         try:
             self._audio_queue.put_nowait(bytes(indata))
         except queue.Full:

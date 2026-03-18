@@ -436,6 +436,88 @@ ALLOW_UPDATE_PERSONALITY_INI=true
 **DEBUG_MODE_INCLUDE_DELTA**: Also print voice and speech delta data, which can get very noisy  
 **ALLOW_UPDATE_PERSONALITY_INI**: If true, personality updates asked for by the user will be written and committed to the personality file. If false, changes to personality parameters will only affect the current running process (`true` is default)
 
+### Local Wake-Word Setup on Raspberry Pi
+
+The local wake-word listener is **optional** and is **disabled by default**. It will not do anything until all three of these are true:
+
+1. `LOCAL_WAKE_WORD_ENABLED=true` is present in `.env`.
+2. The `vosk` Python package is installed in the same environment used by `billy.service`.
+3. A Vosk speech model directory exists on disk, and `LOCAL_WAKE_WORD_MODEL_PATH` points to it.
+
+If any of those are missing, Billy will not start wake-word detection. The Web UI log view reads from `journalctl -u billy.service`, so any wake-word startup or failure messages only appear **after the systemd service has been restarted**.
+
+#### Recommended `.env` settings
+
+```ini
+LOCAL_WAKE_WORD_ENABLED=true
+LOCAL_WAKE_WORD_PHRASE=Hey Billy
+LOCAL_WAKE_WORD_MODEL_PATH=/home/celzor/billy-b-assistant/models/vosk-model-small-en-us-0.15
+LOCAL_WAKE_WORD_COOLDOWN_SECONDS=3
+LOG_LEVEL=INFO
+DEBUG_MODE=true
+```
+
+#### One-time setup commands on the Raspberry Pi
+
+Run these from the project root on the Pi:
+
+```bash
+cd ~/billy-b-assistant
+python3 -m pip install -r requirements.txt
+mkdir -p models
+cd models
+wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+unzip vosk-model-small-en-us-0.15.zip
+cd ..
+```
+
+If your service runs inside a virtual environment, activate that environment first before running `pip install -r requirements.txt`.
+
+#### Update `.env`
+
+Edit `.env` and add:
+
+```ini
+LOCAL_WAKE_WORD_ENABLED=true
+LOCAL_WAKE_WORD_PHRASE=Hey Billy
+LOCAL_WAKE_WORD_MODEL_PATH=/home/celzor/billy-b-assistant/models/vosk-model-small-en-us-0.15
+LOCAL_WAKE_WORD_COOLDOWN_SECONDS=3
+```
+
+#### Restart the Billy service
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart billy.service
+sudo systemctl status billy.service
+```
+
+#### Verify it is actually running
+
+These commands are the fastest way to confirm the wake-word listener is active:
+
+```bash
+journalctl -u billy.service -n 100 --no-pager
+journalctl -u billy.service -f
+```
+
+When configured correctly, you should see lines similar to:
+
+- `Local wake-word enabled (phrase='Hey Billy')`
+- `Wake-word listener active for phrase: 'Hey Billy'`
+- `Wake-word microphone stream started`
+- every ~5 seconds: `Wake-word listener running | target='Hey Billy' | heard_recent=...`
+
+If you instead see a message saying the wake-word model directory is missing, your model path is wrong or the model was never downloaded.
+
+#### Common failure cases
+
+- **No logs in Web UI:** restart `billy.service`; the Web UI only shows logs emitted by the running systemd service.
+- **No `models/...` directory:** the Vosk model has not been downloaded yet.
+- **`vosk` import errors:** install dependencies again in the same Python environment used by the service.
+- **No phrase detections:** check the 5-second heartbeat log lines to see what text Vosk is hearing from the microphone.
+- **Wrong microphone/device:** inspect the normal Billy audio startup logs for the selected input device.
+
 ### Example `persona.ini` File
 
 The `persona.ini` file controls Billy's **personality**, **backstory**, and **additional instructions**. You can edit this file manually, or change the personality trait values during a voice session using commands like:

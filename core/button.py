@@ -295,6 +295,9 @@ def trigger_session(source: str = "button", require_physical_press: bool = False
                 # Release lock when session finishes
                 with contextlib.suppress(Exception):
                     _session_start_lock.release()  # Lock might already be released
+                # Restart the wake word listener so it picks up the next trigger
+                if config.LOCAL_WAKE_WORD_ENABLED and wake_word_listener is not None:
+                    wake_word_listener.start()
 
         session_thread = threading.Thread(target=run_session, daemon=True)
         session_thread.start()

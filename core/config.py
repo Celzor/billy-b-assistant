@@ -163,6 +163,16 @@ FOLLOW_UP_RETRY_LIMIT = int(os.getenv("FOLLOW_UP_RETRY_LIMIT", "1"))
 PLAYBACK_VOLUME = 1
 MOUTH_ARTICULATION = int(os.getenv("MOUTH_ARTICULATION", "5"))
 TURN_EAGERNESS = os.getenv("TURN_EAGERNESS", "high").strip().lower()
+LOCAL_WAKE_WORD_ENABLED = (
+    os.getenv("LOCAL_WAKE_WORD_ENABLED", "false").lower() == "true"
+)
+LOCAL_WAKE_WORD_PHRASE = os.getenv("LOCAL_WAKE_WORD_PHRASE", "hey billy").strip()
+LOCAL_WAKE_WORD_MODEL_PATH = os.getenv(
+    "LOCAL_WAKE_WORD_MODEL_PATH", "models/vosk-model-small-en-us-0.15"
+).strip()
+LOCAL_WAKE_WORD_COOLDOWN_SECONDS = float(
+    os.getenv("LOCAL_WAKE_WORD_COOLDOWN_SECONDS", "3")
+)
 HEAD_RETRACT_DELAY_SECONDS = float(os.getenv("HEAD_RETRACT_DELAY_SECONDS", "1.5"))
 if TURN_EAGERNESS not in {"low", "medium", "high"}:
     TURN_EAGERNESS = "medium"
